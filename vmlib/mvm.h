@@ -1,11 +1,26 @@
 #ifndef MVM_H
 #define MVM_H
+#if defined(_WIN32) && defined(MYVM_BUILDING_LIBRARY)
 #define dllexport __declspec(dllexport)
+#elif defined(_WIN32) && defined(MYVM_USING_SHARED_LIBRARY)
+#define dllexport __declspec(dllimport)
+#else
+#define dllexport
+#endif
 #include <cstring>
+#include <algorithm>
+#include <atomic>
+#include <exception>
 #include <map>
 #include <mutex>
 #include <functional>
-#define lockdo(fun) statelock.lock();fun;statelock.unlock()
+#include <limits>
+#include <vector>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#define lockdo(fun) do { std::lock_guard<std::mutex> myvm_lock_guard(statelock); fun; } while (false)
 //虚拟机核心的port允许32位数据传输，但是不同情况的高位可能无效
 typedef unsigned int dword;
 typedef unsigned long long qword;
@@ -38,57 +53,76 @@ struct RegisterState
 template<class T,class T2>
 struct Array
 {
-    T *data;
-    T2 sum;
+    T *data=nullptr;
+    T2 sum=0;
 
 	T* start() { return data; }
-	T* end() { return data + sum; }
-	//为了方便 本无必要
-	void movein(Array<T, T2> &obj) { if (data) delete[] data; data = obj.data; sum = obj.sum; }
-	bool isnull() { return data == nullptr; }
-	Array(qword size) { 
-		data = new T[size];
-		sum = size; 
-		for (int i = 0; i < size; ++i) 
-			data[i] = 0;/*初始化为0 */
+	T* end() { return data ? data + sum : data; }
+	const T* start() const { return data; }
+	const T* end() const { return data ? data + sum : data; }
+	void movein(Array<T, T2> &obj) { *this = std::move(obj); }
+	bool isnull() const { return data == nullptr; }
+	Array(qword size)
+	{
+		if (size > static_cast<qword>(std::numeric_limits<T2>::max()))
+			throw std::length_error("Array size exceeds its index type");
+		data = size ? new T[static_cast<std::size_t>(size)]{} : nullptr;
+		sum = static_cast<T2>(size);
 	}
-    Array(){data=nullptr;sum=0;}
-    //设定复制构造函数
-    Array(Array &ar)
+    Array() = default;
+    Array(const Array& other) : Array(static_cast<qword>(other.sum))
     {
-        if(data==nullptr) delete data;
-        data=new T[ar.sum];
-        memcpy(data,ar.data,ar.sum);
-        sum=ar.sum;
+        if (other.data) std::copy(other.start(), other.end(), start());
+    }
+    Array(Array&& other) noexcept : data(other.data), sum(other.sum)
+    {
+        other.data = nullptr;
+        other.sum = 0;
+    }
+    Array& operator=(Array other) noexcept
+    {
+        swap(other);
+        return *this;
+    }
+    ~Array() { delete[] data; }
+    void swap(Array& other) noexcept
+    {
+        std::swap(data, other.data);
+        std::swap(sum, other.sum);
     }
 	//索引器 从0开始 返回的是引用
 	T &operator [](T2 index)
 	{
-		if (index >= sum) throw "错误，index越界!";//就这个处理了 不做别的 ,一般来说到这里就是程序出错了不然指令
+		if (index >= sum) throw std::out_of_range("Array index out of range");
 		//函数会处理
+		return data[index];
+	}
+	const T &operator [](T2 index) const
+	{
+		if (index >= sum) throw std::out_of_range("Array index out of range");
 		return data[index];
 	}
 	//取数据地址
 	T *at(T2 index)
 	{
-		if (index >= sum) throw "错误，index越界!";//就这个处理了 不做别的
+		if (index >= sum) throw std::out_of_range("Array index out of range");
 		return data+index;
 	}
 };
+
+class VMError : public std::runtime_error
+{
+public:
+    explicit VMError(const std::string& message) : std::runtime_error(message) {}
+};
+
 struct VMState
 {
-    VMState(){}
-    VMState(VMState &s)
-    {
-        this->regs=s.regs;
-        this->curpoint=s.curpoint;
-        this->len=s.len;
-        this->points=s.points;
-        this->ports=s.ports;
-        this->programptr=s.programptr;
-		this->pointcbk = s.pointcbk;
-		this->pausecbk = s.pausecbk;
-    }
+    VMState() = default;
+    VMState(const VMState&) = default;
+    VMState(VMState&&) noexcept = default;
+    VMState& operator=(const VMState&) = default;
+    VMState& operator=(VMState&&) noexcept = default;
 	//以下为两个回调函数
 	//这两个函数必须被设置
 	PointCallBack pointcbk;
@@ -111,6 +145,20 @@ struct VMState
     qword len=0;//内存空间大小
 
     qword nowstep=0;//当前步数记录器,注意这个标记是始终保持内外同步的，也就是每次进出静止状态都会复制一次
+};
+
+struct VMPointerInspection
+{
+    word id;
+    qword address;
+    qword value;
+};
+
+struct MVMInspection
+{
+    VMState state;
+    qword currdata = 0;
+    std::vector<VMPointerInspection> temporaries;
 };
 
 ///
@@ -164,7 +212,13 @@ class dllexport MVM
 public:
     ///
     /// \brief MVM 初始化虚拟机核心
-    MVM(VMState &state); //端口允许42亿个
+    MVM(const VMState &state); //端口允许42亿个
+    ~MVM();
+    MVM(const MVM&) = delete;
+    MVM& operator=(const MVM&) = delete;
+    VMState getstate() const;
+    MVMInspection inspect() const;
+    std::exception_ptr getworkererror() const;
     //端口相关
     bool addport(IOPortInfo info);
     void deleteport(IOPortInfo);
@@ -197,6 +251,7 @@ public:
 
     void start();//会建立一个新线程执行程序,立即返回,进入是检查need标记
     void stop();//这个会设置停止标记变量（volatile）为真，执行函数末尾会检查它
+    void wait();
     bool havestop();//检测是否停止了 start函数里修改 run函数不修改
     bool run(dword steps);//单步执行函数,参数为执行几个单步,同步函数,只有在非start状态才能调用否则返回false
     //run函数进入时检查need标记 退出时复制所有状态
@@ -204,26 +259,30 @@ public:
 
 private:
     //volatile系列变量
-    volatile bool isneed_ports=true;//是否需要从volatile变量复制端口信息到普通变量,下同
-    volatile bool isneed_register=true;//寄存器
-    volatile bool isneed_points=true;//断点
-    volatile bool isneed_pro=true;//内存空间
+    bool isneed_ports=true;
+    bool isneed_register=true;
+    bool isneed_points=true;
+    bool isneed_pro=true;
 
 
-    volatile bool isrupt=false;//是否开始中断,同时也是标记是否处于中断处理中的变量 内部中断不涉及此处的两个变量
-    //以上变量在外部中断函数里被设置为真，在外部中断处理完后被设置为假
-    volatile dword ruptid=0;//中断号
+	bool isrupt=false;
+	dword ruptid=0;
+	std::mutex interruptlock;
 	//所谓的外部中断也包括除0 之内的vm程序性中断
-	volatile bool isinrupt = false;//标记是否在中断中
+	bool isinrupt = false;//标记是否在中断中
 
 	void startrupt(dword id);//使用指定id开始一个外部中断
 
-    volatile bool isstop=false;//要停止时设置为真 停止后设置为假 如果一开始就为真则执行线程不会做任何事情
-    volatile bool havestoped=true;//标记是否已经
+    std::atomic<bool> isstop{false};
+    std::atomic<bool> havestoped{true};
+    std::thread worker;
+    mutable std::mutex lifecyclelock;
+    mutable std::mutex executionlock;
+    std::exception_ptr workererror;
 
 
     //采用另一种方法 保证线程不会同时操作这两个表
-    std::mutex statelock;//操作锁
+    mutable std::mutex statelock;
     /*volatile*/ VMState outstate;
     VMState instate;
     //以上为内外状态
@@ -247,9 +306,11 @@ private:
 
 
     void doone();//执行一个指令
+    bool validProgramRange(qword offset, qword size) const;
+    byte* gettemp(word id);
 
     //以下为暂存器
-    qword *ptrs[65536];//允许16位标记的内存暂存器地址（可以进行simd操作）
+    byte *ptrs[65536];//允许16位标记的内存暂存器地址（可以进行simd操作）
     bool getmptr=false;//取内存地址标记暂存器
     word getmpi=0;//取内存地址目标索引暂存器 存储从内存地址得到的通用指针存放的内存地址暂存器的id
 

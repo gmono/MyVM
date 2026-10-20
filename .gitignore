@@ -18,6 +18,12 @@
 [Xx]64/
 [Xx]86/
 [Bb]uild/
+[Bb]uild-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
 bld/
 [Bb]in/
 [Oo]bj/
@@ -243,3 +249,4 @@ ModelManifest.xml
 
 # FAKE - F# Make
 .fake/
+imgui.ini

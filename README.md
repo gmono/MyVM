@@ -1,22 +1,55 @@
 # MyVM
-一个专门设计用来研究和实验的VM底层库 以及基础汇编器 还有测试程序还有莫名其妙的错误。奇怪。。指令解析应该没错啊 
+
+MyVM 是用于研究和实验的 C++23 虚拟机、定长字节码汇编器和可视化教学工作台。VM 保留 8 字节指令、显式状态、寄存器/暂存器、中断、端口和同步步进等设计。
+
+## 构建与测试
+
+需要 CMake 3.20+、支持 C++23 的编译器和 Git。CMake 从固定版本获取 ANTLR4 4.13.2 C++ runtime；首次配置需要网络。ANTLR generator jar 位于 `tools/antlr/`。
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+默认构建 VM 静态库 `vmlib`、ANTLR 汇编器、`myvm-asm` 命令行工具和 GUI 无关的教学模型。`BUILD_SHARED_LIBS=ON` 可构建共享 VM 库。安装库、CMake package 和汇编器：
+
+```sh
+cmake --install build --prefix ./install
+```
+
+下游 CMake 项目可通过 `find_package(MyVM CONFIG REQUIRED)` 和 `MyVM::vmlib` 链接 VM 核心。
+
+## MyVM Lab
+
+启用 Dear ImGui 桌面教学工作台需要 SDL2 和 OpenGL 开发包；CMake 会获取固定版本 Dear ImGui 1.92.9b。
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DMYVM_BUILD_LAB=ON
+cmake --build build --target myvm-lab
+./build/myvm-lab
+```
+
+工作台直接使用本仓库的 C++ 汇编器和 VM，支持编辑/保存汇编源码、查看汇编诊断、单步与限量连续执行，并观察当前指令、PC、通用寄存器、`currdata`、地址暂存器、内存、栈和执行历史。内置示例会把 40 加 2 写入 R5，并在 `pause` 指令处停下。详细操作见 [`tools/myvm-lab/README.md`](tools/myvm-lab/README.md)。
+
+汇编语法、指令表和示例见[汇编语言说明](汇编语言.md)。命令行汇编：
+
+```sh
+build/myvm-asm program.asm -o program.bin
+```
+
+双层汇编转译器可把教育型源汇编先降低为 MyVM 汇编，再交给同一个汇编器生成字节码：
+
+```sh
+build/myvm-translate source.asm translated.myvm.asm
+build/myvm-asm translated.myvm.asm -o program.bin
+```
+
+当前支持 `mov`、`add`、`sub`、`mul`、`div`、`cmp`、`jmp`、`je`、`jg`、`jl`、`push`、`pop`、`call`、`ret` 和 `halt`。转译层只负责 lowering，最终编码和诊断仍由 MyVM ANTLR 汇编器负责。
+
+设计边界和仍待补足的测试见[设计与升级方案](设计与升级方案.md)及[升级评估](升级评估.md)。
 # 目的说明
-其实这个VM是很好调试的，因为其设计之初就不是为了性能，而是为了调试和监视的方便而设计的，本来想上面实现各种CPU体系的实验VM，因此设计的比较复杂，特别是在中断方面添加了非常复杂的逻辑，同时将内部所有状态对外暴露，同时还提供异步运行，还提供随时随地的中断和监视能力，因此内部逻辑复杂度可能比较高，目前有些BUG尚未修复，有感兴趣的，或者对汇编感兴趣的可以试试修复，汇编器没有错误，由于以前对编译原理理解不足，个人对字符串处理的能力所限，直接使用的C#的string操作函数，进行的大块式的操作，看起来可能不是那么优雅，有感兴趣的可以自己写个汇编器
+MyVM 是用于研究和实验的虚拟机底层库与汇编器。设计重点是方便调试、观察 VM 状态和实验中断、寄存器、端口及执行控制，不以极限性能为首要目标。VM 同时提供同步定步执行和异步连续执行。
 
 # 重启计划
-MyVM此前由于知识所限和思想局限，代码设计方面并没有很优雅，但其设计架构可取，故于19年12月4日考虑对其重启，最远在一年内重启
-## 修正方面
-将会在以下方面进行修正：
-1. 指令函数不再接收多参数，而是接受一个与其配套的位结构体做参数
-2. 指令函数不再写在虚拟机类里，而是写作一个函数对象
-3. 位结构体（指令体）和指令函数（执行体），都有其抽象父类，其允许指令自己说明自己要接受的指令长度和标记号
-4. 收集所有工具过程和固有过程，例如检查列表是否为空，并以工具函数表文件独立书写
-5. 处理器内部状态将作为一个整体实例存在，像暂存器等都会放入VMState中，并且VMState将纯粹作为一个状态容器存在
-6. 外设环境方面也会统一放入外设数据结构体中，以便自定义
-## 改进方面
-1. VM将可以由外部提供自定义指令，将可以把不同类型的数据做标记号（可序列化类型）
-2. VM将重写线程模型，以更优雅的方式实现多线程
-3. 将不限与IO接口的形式，而是提供更多途径例如内存钩子和IO钩子
-4. 将考虑将环境以表的方式提供，以便动态扩充
-5. 将考虑将VM作为模板类，由用户自己给定“处理器定义对象”和“外部环境对象”
-6. 将使用C++11 14 17等更新版本的功能提供更优雅的外部交互方式
+详细设计边界、已完成修复和后续阶段见[设计与升级方案](设计与升级方案.md)。本次维护保留固定 8 字节指令、显式 VMState、可观察状态、异步执行、中断和外部端口等原始设计方向。

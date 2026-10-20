@@ -1,153 +1,237 @@
 #include "mvm.h"
-#include <thread>
 
+#include <algorithm>
 
-//tmd结构体没有初始构造
-MVM::MVM(VMState &state):outstate(state)
+MVM::MVM(const VMState& state) : outstate(state)
 {
-	if (state.regs.sum < 3) throw "reg sum is too few";
+    if (state.regs.sum < 5) throw std::invalid_argument("VM state requires at least five registers");
+    if (!outstate.pausecbk) outstate.pausecbk = [] {};
+    if (!outstate.pointcbk) outstate.pointcbk = [](qword) {};
+    std::fill(std::begin(ptrs), std::end(ptrs), nullptr);
+}
+
+MVM::~MVM()
+{
+    stop();
+    wait();
+}
+
+VMState MVM::getstate() const
+{
+    std::lock_guard<std::mutex> guard(statelock);
+    return outstate;
+}
+
+MVMInspection MVM::inspect() const
+{
+    std::unique_lock<std::mutex> executionGuard(executionlock, std::try_to_lock);
+    if (!executionGuard.owns_lock())
+        throw std::logic_error("VM inspection requires a stopped execution state");
+
+    std::lock_guard<std::mutex> stateGuard(statelock);
+    MVMInspection inspection;
+    inspection.state = outstate;
+    inspection.currdata = currdata;
+    for (std::size_t id = 0; id < std::size(ptrs); ++id)
+    {
+        if (!ptrs[id]) continue;
+        qword value = 0;
+        std::memcpy(&value, ptrs[id], sizeof(value));
+        inspection.temporaries.push_back({static_cast<word>(id),
+                                          reinterpret_cast<qword>(ptrs[id]), value});
+    }
+    return inspection;
+}
+
+std::exception_ptr MVM::getworkererror() const
+{
+    std::lock_guard<std::mutex> guard(statelock);
+    return workererror;
 }
 
 bool MVM::addport(IOPortInfo info)
 {
-    statelock.lock();
-    if(outstate.ports.find(info.portid)!=outstate.ports.end()) return false;//如果被占用就返回false;
-    outstate.ports.insert(std::pair<dword,IOPort>(info.portid,info.port));//放进去
-    //注意这步最重要
-
-    statelock.unlock();
-    isneed_ports=true;//设置port的need标记
+    std::lock_guard<std::mutex> guard(statelock);
+    if (outstate.ports.find(info.portid) != outstate.ports.end()) return false;
+    outstate.ports.insert(std::make_pair(info.portid, info.port));
+    isneed_ports = true;
     return true;
 }
 
 void MVM::deleteport(IOPortInfo info)
 {
-    statelock.lock();
-    if(outstate.ports.find(info.portid)==outstate.ports.end()) return;//没有就返回;
-    outstate.ports.erase(info.portid);//删除
-    //注意这步最重要
-
-    statelock.unlock();
-    isneed_ports=true;//设置port的need标记
+    std::lock_guard<std::mutex> guard(statelock);
+    if (outstate.ports.erase(info.portid) != 0) isneed_ports = true;
 }
 
 bool MVM::exist(dword portid)
 {
-    bool ret;
-    lockdo(ret=outstate.ports.find(portid)!=outstate.ports.end());
-    return ret;
+    std::lock_guard<std::mutex> guard(statelock);
+    return outstate.ports.find(portid) != outstate.ports.end();
 }
 
 void MVM::setval(dword portid, dword value)
 {
-    if(exist(portid))
+    IOPortSetFun callback;
     {
-
-        lockdo(IOPort &p=outstate.ports[portid];p.portset(value));//调用设置函数
-        isneed_ports=true;//设置标记
+        std::lock_guard<std::mutex> guard(statelock);
+        const auto port = outstate.ports.find(portid);
+        if (port == outstate.ports.end()) return;
+        callback = port->second.portset;
+        isneed_ports = true;
     }
+    if (callback) callback(value);
 }
 
-void MVM::setprogram(void *pro, qword maxlen)
+void MVM::setprogram(void* program, qword maxlen)
 {
-    lockdo(outstate.programptr=pro;outstate.len=maxlen);
-    isneed_pro=true;//设置标记
+    if (maxlen != 0 && program == nullptr) throw std::invalid_argument("program pointer is null");
+    std::lock_guard<std::mutex> guard(statelock);
+    outstate.programptr = program;
+    outstate.len = maxlen;
+    isneed_pro = true;
 }
 
-void MVM::setpausecbk(PauseCallBack cbk)
+void MVM::setpausecbk(PauseCallBack callback)
 {
-	outstate.pausecbk = cbk;
+    std::lock_guard<std::mutex> guard(statelock);
+    outstate.pausecbk = callback ? callback : PauseCallBack([] {});
 }
 
-void MVM::setruptpoint(PointCallBack cbk)
+void MVM::setruptpoint(PointCallBack callback)
 {
-	outstate.pointcbk = cbk;
+    std::lock_guard<std::mutex> guard(statelock);
+    outstate.pointcbk = callback ? callback : PointCallBack([](qword) {});
 }
 
-void MVM::setpointtable(qword *list, qword sum)
+void MVM::setpointtable(qword* list, qword sum)
 {
-    Array<qword,qword> ar;
-    ar.data=list;
-    ar.sum=sum;
-
-    lockdo(outstate.points=ar);
-
-    //设置标记
-    isneed_points=true;
+    if (sum != 0 && list == nullptr) throw std::invalid_argument("breakpoint list is null");
+    Array<qword, qword> points(sum);
+    if (sum) std::copy(list, list + sum, points.data);
+    std::lock_guard<std::mutex> guard(statelock);
+    outstate.points = std::move(points);
+    outstate.curpoint = 0;
+    isneed_points = true;
 }
 
 bool MVM::interrupt(dword id)
 {
-    if(isrupt) return false;
-    ruptid=id;//设置中断号
-    isrupt=true;//设置进入中断
+    std::lock_guard<std::mutex> guard(interruptlock);
+    if (isrupt) return false;
+    ruptid = id;
+    isrupt = true;
     return true;
 }
 
 void MVM::start()
 {
-    std::thread th([this](){
-        havestoped=false;
-        //线程一开始就复制入
-        lockdo(copyin());
-
-        while(!isstop)
+    std::lock_guard<std::mutex> lifecycleGuard(lifecyclelock);
+    if (worker.joinable())
+    {
+        if (!havestoped.load()) return;
+        worker.join();
+    }
+    {
+        std::lock_guard<std::mutex> stateGuard(statelock);
+        workererror = nullptr;
+        isstop.store(false);
+        havestoped.store(false);
+    }
+    try
+    {
+        worker = std::thread([this]()
         {
-            //无限循环执行 直到stop标记为真
-            this->doone();
-        }
-        //结束时复制出
-        lockdo(outstate=instate);
-        isstop=false;
-        havestoped=true;
-    });
-    th.detach();//分离，自生自灭
-
+            std::unique_lock<std::mutex> executionGuard(executionlock);
+            try
+            {
+                {
+                    std::lock_guard<std::mutex> stateGuard(statelock);
+                    copyin();
+                }
+                while (!isstop.load()) doone();
+            }
+            catch (...)
+            {
+                std::lock_guard<std::mutex> stateGuard(statelock);
+                workererror = std::current_exception();
+            }
+            {
+                std::lock_guard<std::mutex> stateGuard(statelock);
+                outstate = instate;
+            }
+            isstop.store(true);
+            havestoped.store(true);
+        });
+    }
+    catch (...)
+    {
+        havestoped.store(true);
+        isstop.store(true);
+        throw;
+    }
 }
 
 void MVM::stop()
 {
-    isstop=true;
+    isstop.store(true);
+}
+
+void MVM::wait()
+{
+    std::lock_guard<std::mutex> guard(lifecyclelock);
+    if (worker.joinable())
+    {
+        if (worker.get_id() == std::this_thread::get_id())
+            throw std::logic_error("VM worker cannot wait for itself");
+        worker.join();
+    }
 }
 
 bool MVM::havestop()
 {
-    return havestoped;
+    return havestoped.load();
 }
 
 bool MVM::run(dword steps)
 {
-    //复制进入
-    copyin();
-    for(dword i=0;i<steps;++i)
+    std::unique_lock<std::mutex> executionGuard(executionlock, std::try_to_lock);
+    if (!executionGuard.owns_lock() || !havestoped.load()) return false;
     {
-        this->doone();
+        std::lock_guard<std::mutex> stateGuard(statelock);
+        copyin();
     }
-    outstate=instate;//由于不是多线程执行 不需要锁定
+    try
+    {
+        for (dword i = 0; i < steps; ++i) doone();
+    }
+    catch (...)
+    {
+        std::lock_guard<std::mutex> stateGuard(statelock);
+        outstate = instate;
+        throw;
+    }
+    {
+        std::lock_guard<std::mutex> stateGuard(statelock);
+        outstate = instate;
+    }
     return true;
 }
 
-
 void MVM::startrupt(dword id)
 {
-	ruptid = id;
-	isrupt = true;
+    std::lock_guard<std::mutex> guard(interruptlock);
+    ruptid = id;
+    isrupt = true;
 }
 
 void MVM::copyin()
 {
-	if (isneed_register) {
-		instate.regs = outstate.regs; isneed_register = false;
-	}
-	if (isneed_points) { instate.points = outstate.points; instate.curpoint = outstate.curpoint; isneed_points = false; }
-	if (isneed_ports) {
-		instate.ports = outstate.ports; isneed_ports = false;
-	}
-	if (isneed_pro) { instate.programptr = outstate.programptr; instate.len = outstate.len; isneed_pro = false; }
-	//以下内容只在复制入时有意义 出时无意义 因此可以每次都向内复制进入
-    instate.nowstep=outstate.nowstep;
-	instate.pointcbk = outstate.pointcbk;
-	instate.pausecbk = outstate.pausecbk;
-	
+    if (isneed_register) { instate.regs = outstate.regs; isneed_register = false; }
+    if (isneed_points) { instate.points = outstate.points; instate.curpoint = outstate.curpoint; isneed_points = false; }
+    if (isneed_ports) { instate.ports = outstate.ports; isneed_ports = false; }
+    if (isneed_pro) { instate.programptr = outstate.programptr; instate.len = outstate.len; isneed_pro = false; }
+    instate.nowstep = outstate.nowstep;
+    instate.pointcbk = outstate.pointcbk;
+    instate.pausecbk = outstate.pausecbk;
 }
-

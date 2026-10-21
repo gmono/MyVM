@@ -114,6 +114,12 @@ void MVM::doone()
     case 20: call(); break;
     case 21: ret(); break;
     case 22: iret(); break;
+    case 23: bitAnd(readWord(instruction + 6)); break;
+    case 24: bitOr(readWord(instruction + 6)); break;
+    case 25: bitXor(readWord(instruction + 6)); break;
+    case 26: shl(readWord(instruction + 6)); break;
+    case 27: shr(readWord(instruction + 6)); break;
+    case 28: bitnot(readWord(instruction + 6)); break;
     default: startrupt(0); break;
     }
 }
@@ -277,6 +283,12 @@ void MVM::ret()
 }
 
 void MVM::iret() { isinrupt = false; ret(); }
+void MVM::bitAnd(word id) { qword value; std::memcpy(&value, gettemp(id), sizeof(value)); value &= currdata; std::memcpy(gettemp(id), &value, sizeof(value)); }
+void MVM::bitOr(word id) { qword value; std::memcpy(&value, gettemp(id), sizeof(value)); value |= currdata; std::memcpy(gettemp(id), &value, sizeof(value)); }
+void MVM::bitXor(word id) { qword value; std::memcpy(&value, gettemp(id), sizeof(value)); value ^= currdata; std::memcpy(gettemp(id), &value, sizeof(value)); }
+void MVM::shl(word id) { qword value; std::memcpy(&value, gettemp(id), sizeof(value)); value <<= (currdata & 63); std::memcpy(gettemp(id), &value, sizeof(value)); }
+void MVM::shr(word id) { qword value; std::memcpy(&value, gettemp(id), sizeof(value)); value >>= (currdata & 63); std::memcpy(gettemp(id), &value, sizeof(value)); }
+void MVM::bitnot(word id) { qword value; std::memcpy(&value, gettemp(id), sizeof(value)); value = ~value; std::memcpy(gettemp(id), &value, sizeof(value)); }
 void MVM::tojmp(qword pointer) { instate.regs[0] = pointer; }
 
 void MVM::tocall(qword pointer)

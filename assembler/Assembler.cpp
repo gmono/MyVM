@@ -57,6 +57,9 @@ const std::unordered_map<std::string, Instruction>& instructionSet()
         add("jmp", 14, {}); add("asjmp", 15, {1}); add("push", 16, {}); add("pop", 17, {});
         add("read", 18, {4}); add("write", 19, {4}); add("call", 20, {});
         add("ret", 21, {}); add("iret", 22, {});
+        add("and", 23, {2}, Index::temporaryId); add("or", 24, {2}, Index::temporaryId);
+        add("xor", 25, {2}, Index::temporaryId); add("shl", 26, {2}, Index::temporaryId);
+        add("shr", 27, {2}, Index::temporaryId); add("not", 28, {2}, Index::temporaryId);
         return result;
     }();
     return instructions;

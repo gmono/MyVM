@@ -137,9 +137,11 @@ std::string Translator::translate(const std::string& source, const std::string&)
         std::string mnemonic;
         statement >> mnemonic;
         mnemonic = lower(mnemonic);
+        if (!mnemonic.empty() && mnemonic.front() == '.') continue;
         std::string operandsText;
         std::getline(statement, operandsText);
         const auto operands = splitOperands(trim(operandsText), line.number);
+        output << "; @macro line=" << line.number << " op=" << mnemonic << "\n";
 
         if (mnemonic == "mov")
         {
@@ -149,7 +151,9 @@ std::string Translator::translate(const std::string& source, const std::string&)
             else output << loadImmediate(immediate(operands[1], line.number));
             output << storeRegister(dst);
         }
-        else if (mnemonic == "add" || mnemonic == "sub" || mnemonic == "mul" || mnemonic == "div")
+        else if (mnemonic == "add" || mnemonic == "sub" || mnemonic == "mul" || mnemonic == "div" ||
+                 mnemonic == "and" || mnemonic == "or" || mnemonic == "xor" ||
+                 mnemonic == "shl" || mnemonic == "shr")
         {
             requireCount(operands, 2, line.number, mnemonic);
             const auto dst = registerId(lower(operands[0]), line.number);
@@ -157,6 +161,14 @@ std::string Translator::translate(const std::string& source, const std::string&)
             else output << loadImmediate(immediate(operands[1], line.number));
             output << "    leareg " << dst << ", t0\n    " << (mnemonic == "sub" ? "dec" : mnemonic)
                    << " t0\n";
+        }
+        else if (mnemonic == "inc" || mnemonic == "not")
+        {
+            requireCount(operands, 1, line.number, mnemonic);
+            const auto dst = registerId(lower(operands[0]), line.number);
+            if (mnemonic == "inc") output << loadImmediate("d1");
+            else output << loadImmediate("d0");
+            output << "    leareg " << dst << ", t0\n    " << (mnemonic == "inc" ? "add" : "not") << " t0\n";
         }
         else if (mnemonic == "cmp")
         {
@@ -209,5 +221,105 @@ std::string Translator::translate(const std::string& source, const std::string&)
             throw TranslationError(line.number, "未知源指令: " + mnemonic);
     }
     return output.str();
+}
+
+std::string Translator::translateZigIntel(const std::string& source, const std::string& sourceName)
+{
+    std::ostringstream lowered;
+    lowered << ".code\n";
+    std::istringstream input(source);
+    std::vector<std::string> sourceLines;
+    std::string raw;
+    while (std::getline(input, raw)) sourceLines.push_back(raw);
+    std::unordered_map<std::string, std::string> publicAliases;
+    for (const auto& sourceLine : sourceLines)
+    {
+        const auto text = trim(sourceLine);
+        const auto equal = text.find(" = .L");
+        if (equal != std::string::npos)
+            publicAliases[trim(text.substr(equal + 3))] = trim(text.substr(0, equal));
+    }
+    std::size_t line = 0;
+    std::string pendingPublic;
+    const std::unordered_map<std::string, std::string> registers = {
+        {"rax", "r5"}, {"rbx", "r6"}, {"rcx", "r7"}, {"rdx", "r8"},
+        {"rdi", "r9"}, {"rsi", "r10"}, {"rdp", "r11"}, {"rsp", "r12"}
+    };
+    auto mapRegister = [&](std::string value) {
+        value = lower(trim(value));
+        const auto found = registers.find(value);
+        return found == registers.end() ? std::string{} : found->second;
+    };
+    for (const auto& sourceLine : sourceLines)
+    {
+        ++line;
+        raw = sourceLine;
+        auto text = trim(raw);
+        if (text.empty() || text[0] == '#' || text == ".text") continue;
+        if (text.rfind(".globl ", 0) == 0)
+        {
+            pendingPublic = trim(text.substr(7));
+            continue;
+        }
+        if (text.back() == ':')
+        {
+            if (text.rfind(".L", 0) == 0)
+            {
+                const auto publicAlias = publicAliases.find(text.substr(0, text.size() - 1));
+                if (publicAlias != publicAliases.end())
+                    lowered << publicAlias->second << ":\n";
+                else if (!pendingPublic.empty())
+                {
+                    lowered << pendingPublic << ":\n";
+                    pendingPublic.clear();
+                }
+                continue;
+            }
+            lowered << text << '\n';
+            continue;
+        }
+        if (text[0] == '.') continue;
+        if (text.find(" = .L") != std::string::npos)
+            continue;
+        std::istringstream statement(text);
+        std::string mnemonic;
+        statement >> mnemonic;
+        mnemonic = lower(mnemonic);
+        std::string operands;
+        std::getline(statement, operands);
+        operands = trim(operands);
+        if (mnemonic == "push" || mnemonic == "pop") continue; // Zig prologue/epilogue.
+        if (mnemonic == "ret") { lowered << "    ret\n"; continue; }
+        if (mnemonic == "mov")
+        {
+            const auto comma = operands.find(',');
+            if (comma == std::string::npos) throw TranslationError(line, "Zig Intel mov 缺少逗号");
+            const auto dst = mapRegister(operands.substr(0, comma));
+            const auto src = mapRegister(operands.substr(comma + 1));
+            if (dst.empty() || src.empty()) continue; // 栈帧建立等宿主细节。
+            lowered << "    mov " << dst << ", " << src << '\n';
+            continue;
+        }
+        if (mnemonic == "lea")
+        {
+            const auto comma = operands.find(',');
+            if (comma == std::string::npos) throw TranslationError(line, "Zig Intel lea 缺少逗号");
+            const auto dst = mapRegister(operands.substr(0, comma));
+            auto address = trim(operands.substr(comma + 1));
+            if (address.size() < 2 || address.front() != '[' || address.back() != ']')
+                throw TranslationError(line, "只支持简单的 Zig Intel [reg + reg] lea");
+            address = address.substr(1, address.size() - 2);
+            const auto plus = address.find('+');
+            if (plus == std::string::npos) throw TranslationError(line, "lea 必须包含两个寄存器");
+            const auto lhs = mapRegister(address.substr(0, plus));
+            const auto rhs = mapRegister(address.substr(plus + 1));
+            if (dst.empty() || lhs.empty() || rhs.empty()) throw TranslationError(line, "不支持的 Zig ABI 寄存器");
+            lowered << "    mov " << dst << ", " << lhs << "\n"
+                    << "    add " << dst << ", " << rhs << '\n';
+            continue;
+        }
+        throw TranslationError(line, "不支持的 Zig Intel 指令: " + mnemonic + " (" + sourceName + ")");
+    }
+    return translate(lowered.str(), sourceName);
 }
 }

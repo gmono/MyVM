@@ -45,7 +45,17 @@ build/myvm-translate source.asm translated.myvm.asm
 build/myvm-asm translated.myvm.asm -o program.bin
 ```
 
-当前支持 `mov`、`add`、`sub`、`mul`、`div`、`cmp`、`jmp`、`je`、`jg`、`jl`、`push`、`pop`、`call`、`ret` 和 `halt`。转译层只负责 lowering，最终编码和诊断仍由 MyVM ANTLR 汇编器负责。
+当前支持 `mov`、`add`、`sub`、`mul`、`div`、`and`、`or`、`xor`、`shl`、`shr`、`inc`、`not`、`cmp`、`jmp`、`je`、`jg`、`jl`、`push`、`pop`、`call`、`ret` 和 `halt`。底层指令作为 micro-op；每条上层源指令可展开为多个 micro-op，并保留源行映射标记。转译层只负责 lowering，最终编码和诊断仍由 MyVM ANTLR 汇编器负责。
+
+仓库包含 Zig freestanding Intel 汇编的实验性入口，但它目前只是转译器基础设施验证，不能视为完整 x86-64 支持。完整指令族、寄存器、RFLAGS、寻址和 SIMD 的目标见 [x86-64 支持矩阵](x86-64支持矩阵.md)。
+
+仓库现在还集成了 Zydis 4.1.1 的完整 x86-64 解码层。启用 `MYVM_BUILD_X86=ON`（默认开启）后可使用：
+
+```sh
+build/myvm-x86-decode raw.bin
+```
+
+该层可以识别完整 x86-64 编码并保留原始字节、长度、助记符、寄存器、立即数和内存操作数；语义 lowering 仍按 [x86-64 支持矩阵](x86-64支持矩阵.md) 分阶段放行，未实现语义的指令不会被静默转换。
 
 设计边界和仍待补足的测试见[设计与升级方案](设计与升级方案.md)及[升级评估](升级评估.md)。
 # 目的说明

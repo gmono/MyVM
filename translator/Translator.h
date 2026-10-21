@@ -21,5 +21,7 @@ class Translator final
 public:
     static std::string translate(const std::string& source,
                                  const std::string& sourceName = "<source>");
+    static std::string translateZigIntel(const std::string& source,
+                                         const std::string& sourceName = "<zig-asm>");
 };
 }

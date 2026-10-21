@@ -356,6 +356,12 @@ private:
 	void call();//函数跳转 
 	void ret();//函数返回
 	void iret();//中断返回
+    void bitAnd(word id);
+    void bitOr(word id);
+    void bitXor(word id);
+    void shl(word id);
+    void shr(word id);
+    void bitnot(word id);
 
 	//辅助函数系列
 	void tojmp(qword ptr);//通用跳转函数

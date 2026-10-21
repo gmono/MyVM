@@ -60,6 +60,43 @@ target_compile_features(myvm-translator PUBLIC cxx_std_23)
 add_executable(myvm-translate translator/main.cpp)
 target_link_libraries(myvm-translate PRIVATE myvm-translator)
 
+option(MYVM_BUILD_X86 "Build the Zydis-backed x86-64 decoder" ON)
+if(MYVM_BUILD_X86)
+    FetchContent_Declare(zydis
+        GIT_REPOSITORY https://github.com/zyantific/zydis.git
+        GIT_TAG v4.1.1
+        GIT_SHALLOW TRUE)
+    set(ZYDIS_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(ZYDIS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(ZYDIS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(ZYDIS_FEATURE_ENCODER OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(zydis)
+    add_library(myvm-x86 STATIC x86/X86Decoder.cpp)
+    target_include_directories(myvm-x86 PUBLIC x86)
+    target_link_libraries(myvm-x86 PUBLIC Zydis)
+    target_compile_features(myvm-x86 PUBLIC cxx_std_23)
+    add_executable(myvm-x86-decode x86/main.cpp)
+    target_link_libraries(myvm-x86-decode PRIVATE myvm-x86)
+endif()
+
+option(MYVM_BUILD_ZIG_DEMO "Build the Zig freestanding to MyVM demonstration" OFF)
+if(MYVM_BUILD_ZIG_DEMO)
+    find_program(ZIG_EXECUTABLE zig REQUIRED)
+    set(MYVM_ZIG_ASM ${CMAKE_CURRENT_BINARY_DIR}/myvm-zig-demo.s)
+    set(MYVM_ZIG_SOURCE ${CMAKE_CURRENT_BINARY_DIR}/myvm-zig-demo.myvm.asm)
+    set(MYVM_ZIG_BINARY ${CMAKE_CURRENT_BINARY_DIR}/myvm-zig-demo.bin)
+    add_custom_command(OUTPUT ${MYVM_ZIG_BINARY}
+        COMMAND ${ZIG_EXECUTABLE} build-obj ${CMAKE_CURRENT_SOURCE_DIR}/zig/demo.zig
+            -target x86_64-freestanding -O ReleaseSmall
+            -femit-asm=${MYVM_ZIG_ASM} -fno-stack-check -fno-stack-protector -fstrip
+        COMMAND $<TARGET_FILE:myvm-translate> --zig-intel ${MYVM_ZIG_ASM} ${MYVM_ZIG_SOURCE}
+        COMMAND $<TARGET_FILE:myvm-asm> ${MYVM_ZIG_SOURCE} -o ${MYVM_ZIG_BINARY}
+        DEPENDS zig/demo.zig myvm-translate myvm-asm
+        COMMENT "Compiling Zig freestanding demo through the MyVM two-level assembler"
+        VERBATIM)
+    add_custom_target(myvm-zig-demo DEPENDS ${MYVM_ZIG_BINARY})
+endif()
+
 find_package(Java COMPONENTS Runtime QUIET)
 if(Java_JAVA_EXECUTABLE)
     add_custom_command(
@@ -171,6 +208,12 @@ if(BUILD_TESTING)
     add_executable(myvm-translator-tests test/translator_tests.cpp)
     target_link_libraries(myvm-translator-tests PRIVATE myvm-translator)
     add_test(NAME myvm-translator-tests COMMAND myvm-translator-tests)
+
+    if(MYVM_BUILD_X86)
+        add_executable(myvm-x86-decoder-tests test/x86_decoder_tests.cpp)
+        target_link_libraries(myvm-x86-decoder-tests PRIVATE myvm-x86)
+        add_test(NAME myvm-x86-decoder-tests COMMAND myvm-x86-decoder-tests)
+    endif()
 
     add_test(NAME myvm-asm-cli
         COMMAND ${CMAKE_COMMAND}
